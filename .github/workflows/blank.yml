@@ -1,3 +1,4 @@
+
 name: Build Kernel 4.14 (Vanilla / ReSuKISU + SUSFS)
 
 on:
@@ -24,80 +25,97 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Determine Build Name & ZIP
         id: set_name
+        shell: bash
         run: |
-          if [ "${{ inputs.build_type }}" == "ReSuKISU" ]; then
-            if [ "${{ inputs.include_susfs }}" == "true" ]; then
-              echo "ZIP_NAME=ReSuKISU-SUSFS-Kernel-4.14-Camellia.zip" >> $GITHUB_ENV
-              echo "BUILD_TITLE=ReSuKISU + SUSFS" >> $GITHUB_ENV
+          if [ "${{ inputs.build_type }}" = "ReSuKISU" ]; then
+            if [ "${{ inputs.include_susfs }}" = "true" ]; then
+              echo "ZIP_NAME=ReSuKISU-SUSFS-Kernel-4.14-Camellia.zip" >> "$GITHUB_ENV"
+              echo "BUILD_TITLE=ReSuKISU + SUSFS" >> "$GITHUB_ENV"
             else
-              echo "ZIP_NAME=ReSuKISU-Kernel-4.14-Camellia.zip" >> $GITHUB_ENV
-              echo "BUILD_TITLE=ReSuKISU" >> $GITHUB_ENV
+              echo "ZIP_NAME=ReSuKISU-Kernel-4.14-Camellia.zip" >> "$GITHUB_ENV"
+              echo "BUILD_TITLE=ReSuKISU" >> "$GITHUB_ENV"
             fi
           else
-            echo "ZIP_NAME=Vanilla-Kernel-4.14-Camellia.zip" >> $GITHUB_ENV
-            echo "BUILD_TITLE=Vanilla Kernel" >> $GITHUB_ENV
+            echo "ZIP_NAME=Vanilla-Kernel-4.14-Camellia.zip" >> "$GITHUB_ENV"
+            echo "BUILD_TITLE=Vanilla Kernel" >> "$GITHUB_ENV"
           fi
-
-      - name: Send Telegram Build Started
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          message: |
-            🚀 **BUILD KERNEL DIMULAI!**
-            🔹 Tipe: ${{ env.BUILD_TITLE }}
-            🔹 Defconfig: ${{ inputs.defconfig }}
-            🔹 Run Number: ${{ github.run_number }}
-            Mohon tunggu...
 
       - name: Setup Environment & Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc git wget curl zip dos2unix
+          sudo apt-get install -y \
+            build-essential \
+            libncurses-dev \
+            bison \
+            flex \
+            libssl-dev \
+            bc \
+            git \
+            wget \
+            curl \
+            zip \
+            dos2unix
 
       - name: Clone Kernel Source
         run: |
-          git clone --depth=1 https://github.com/rwxrx-rx/android_kernel_xiaomi_camellia -b lineage-23.2 kernel-source
+          git clone --depth=1 \
+            https://github.com/rwxrx-rx/android_kernel_xiaomi_camellia \
+            -b lineage-23.2 kernel-source
 
       - name: Setup ReSuKISU & SUSFS
         if: inputs.build_type == 'ReSuKISU'
+        shell: bash
         run: |
+          set -e
           cd kernel-source
-          
-          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git KernelSU
-          ln -sf ../KernelSU/kernel drivers/KernelSU
-          
+
+          git clone --depth=1 \
+            https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+
+          ln -sfn ../KernelSU/kernel drivers/KernelSU
+
           if ! grep -q "KernelSU" drivers/Makefile; then
             echo "obj-y += KernelSU/" >> drivers/Makefile
           fi
-          
-          cat <<EOF >> arch/arm64/configs/${{ inputs.defconfig }}
+
+          cat <<'EOF' >> "arch/arm64/configs/${{ inputs.defconfig }}"
           CONFIG_KSU=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
           EOF
-          
-          if [ "${{ inputs.include_susfs }}" == "true" ]; then
-            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+
+          if [ "${{ inputs.include_susfs }}" = "true" ]; then
+            git clone --depth=1 \
+              https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+
             cp ../susfs4ksu/kernel_patches/fs/susfs.c fs/
             cp ../susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-            cp ../susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/ 2>/dev/null || true
-            cp ../susfs4ksu/kernel_patches/fs/sus_su.c fs/ 2>/dev/null || true
-            
-            patch -p1 < ../susfs4ksu/kernel_patches/50_recipe_for_4.14.patch || true
-            
+
+            cp ../susfs4ksu/kernel_patches/include/linux/susfs_def.h \
+              include/linux/ 2>/dev/null || true
+
+            cp ../susfs4ksu/kernel_patches/fs/sus_su.c \
+              fs/ 2>/dev/null || true
+
+            patch -p1 \
+              < ../susfs4ksu/kernel_patches/50_recipe_for_4.14.patch || true
+
             cd KernelSU
-            patch -p1 < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+
+            patch -p1 \
+              < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+
             cd ..
-            
-            cat <<EOF >> arch/arm64/configs/${{ inputs.defconfig }}
+
+            cat <<'EOF' >> "arch/arm64/configs/${{ inputs.defconfig }}"
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -117,29 +135,40 @@ jobs:
         run: |
           mkdir -p toolchain/clang
           cd toolchain/clang
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git .
+          git clone --depth=1 \
+            https://github.com/kdrag0n/proton-clang.git .
 
       - name: Setup GCC Toolchain
         run: |
           cd toolchain
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
+
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+            gcc64
+
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
+            gcc32
 
       - name: Compile Kernel
+        shell: bash
         run: |
+          set -e
           cd kernel-source
-          
+
           export KBUILD_BUILD_USER="root"
           export KBUILD_BUILD_HOST="root"
+
           export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+
           export HOSTCC=/usr/bin/gcc
           export HOSTCXX=/usr/bin/g++
           export HOSTLD=/usr/bin/ld
           export HOSTAR=/usr/bin/ar
-          
-          make O=out ARCH=arm64 ${{ inputs.defconfig }}
-          
-          make -j$(nproc --all) O=out \
+
+          make O=out ARCH=arm64 "${{ inputs.defconfig }}"
+
+          make -j"$(nproc --all)" O=out \
             ARCH=arm64 \
             CC=clang \
             LD=ld.lld \
@@ -152,12 +181,36 @@ jobs:
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-      - name: Package Kernel (AnyKernel3)
+      - name: Verify Kernel Image
+        shell: bash
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 -b master anykernel
+          set -e
+
+          cd kernel-source
+
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "KERNEL_IMAGE=out/arch/arm64/boot/Image.gz-dtb" >> "$GITHUB_ENV"
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            echo "KERNEL_IMAGE=out/arch/arm64/boot/Image.gz" >> "$GITHUB_ENV"
+          elif [ -f out/arch/arm64/boot/Image ]; then
+            echo "KERNEL_IMAGE=out/arch/arm64/boot/Image" >> "$GITHUB_ENV"
+          else
+            echo "ERROR: Kernel image not found!"
+            exit 1
+          fi
+
+      - name: Package Kernel (AnyKernel3)
+        shell: bash
+        run: |
+          set -e
+
+          git clone --depth=1 \
+            https://github.com/osm0sis/AnyKernel3 \
+            -b master anykernel
+
           rm -rf anykernel/.git anykernel/README.md
-          
-          cat << 'EOF' > anykernel/anykernel.sh
+
+          cat <<'EOF' > anykernel/anykernel.sh
           properties() { '
           kernel.string=Custom Kernel 4.14 Camellia
           do.devicecheck=0
@@ -166,81 +219,45 @@ jobs:
           do.cleanup=1
           do.cleanuponabort=0
           '; }
-          
+
           boot_attributes() {
           set_perm_recursive 0 0 755 644 $RAMDISK/*;
           set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
           }
-          
+
           BLOCK=/dev/block/by-name/boot;
           IS_SLOT_DEVICE=auto;
           RAMDISK_COMPRESSION=auto;
           PATCH_VBMETA_FLAG=auto;
-          
+
           . tools/ak3-core.sh;
           dump_boot;
           write_boot;
           EOF
-          
-          if [ -f "kernel-source/out/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp kernel-source/out/arch/arm64/boot/Image.gz-dtb anykernel/
-          elif [ -f "kernel-source/out/arch/arm64/boot/Image.gz" ]; then
-            cp kernel-source/out/arch/arm64/boot/Image.gz anykernel/
-          else
-            cp kernel-source/out/arch/arm64/boot/Image anykernel/
-          fi
-          
+
+          cp "kernel-source/$KERNEL_IMAGE" anykernel/
+
           cd anykernel
-          zip -r9 ../${{ env.ZIP_NAME }} *
 
-      - name: Generate Changelog
-        id: changelog
+          zip -r9 "$GITHUB_WORKSPACE/${{ env.ZIP_NAME }}" .
+
+      - name: Verify ZIP Package
+        shell: bash
         run: |
-          cd kernel-source
-          git log -5 --pretty=format:"- %s (%an)" > ../changelog.txt
-          echo "" >> ../changelog.txt 
-          
-          cd ..
-          {
-            echo "GENERATED_CHANGELOG<<EOF"
-            echo "🔹 **Build Type:** ${{ env.BUILD_TITLE }}"
-            echo "🔹 **Kernel Version:** 4.14.357"
-            echo "🔹 **Toolchain:** Proton-Clang"
-            echo "🔹 **Latest Commits:**"
-            cat changelog.txt
-            echo "EOF"
-          } >> $GITHUB_ENV
+          set -e
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v4.14-${{ inputs.build_type }}-${{ github.run_number }}
-          name: "${{ env.BUILD_TITLE }} Kernel 4.14 Build #${{ github.run_number }}"
-          body: ${{ env.GENERATED_CHANGELOG }}
-          files: ${{ env.ZIP_NAME }}
+          if [ ! -s "${{ env.ZIP_NAME }}" ]; then
+            echo "ERROR: ZIP package is missing or empty!"
+            exit 1
+          fi
 
-      - name: Send Telegram Build Success
-        if: success()
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          document: "${{ env.ZIP_NAME }}"
-          caption: |
-            ✅ **BUILD KERNEL BERHASIL!**
-            
-            ${{ env.GENERATED_CHANGELOG }}
+          echo "Package created successfully:"
+          ls -lh "${{ env.ZIP_NAME }}"
 
-      - name: Send Telegram Build Failed
-        if: failure()
-        uses: appleboy/telegram-action@master
+      - name: Upload Kernel ZIP Artifact
+        uses: actions/upload-artifact@v4
         with:
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          message: |
-            ❌ **BUILD KERNEL GAGAL!**
-            Tipe Build: ${{ env.BUILD_TITLE }}
-            Silakan cek log GitHub Actions.
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+          retention-days: 14
