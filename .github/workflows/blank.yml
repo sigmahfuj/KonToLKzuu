@@ -8,48 +8,60 @@ on:
         description: 'Target Defconfig File Name'
         required: true
         default: 'camellian_gl_defconfig'
+        type: string
+
       build_type:
-        description: 'Pilih Tipe Build Kernel'
+        description: 'Select Kernel Build Type'
         required: true
         type: choice
         default: 'ReSuKISU'
         options:
           - Vanilla
           - ReSuKISU
+
       include_susfs:
-        description: 'Gunakan SUSFS (Hanya Berlaku jika memilih ReSuKISU)'
+        description: 'Enable SUSFS (ReSuKISU only)'
         required: true
         type: boolean
         default: true
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Build Kernel Image
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Determine Build Name & ZIP
-        id: set_name
+      - name: Determine Build Information
         shell: bash
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+          INCLUDE_SUSFS: ${{ inputs.include_susfs }}
         run: |
-          if [ "${{ inputs.build_type }}" = "ReSuKISU" ]; then
-            if [ "${{ inputs.include_susfs }}" = "true" ]; then
-              echo "ZIP_NAME=ReSuKISU-SUSFS-Kernel-4.14-Camellia.zip" >> "$GITHUB_ENV"
+          set -e
+
+          if [ "$BUILD_TYPE" = "ReSuKISU" ]; then
+            if [ "$INCLUDE_SUSFS" = "true" ]; then
               echo "BUILD_TITLE=ReSuKISU + SUSFS" >> "$GITHUB_ENV"
             else
-              echo "ZIP_NAME=ReSuKISU-Kernel-4.14-Camellia.zip" >> "$GITHUB_ENV"
               echo "BUILD_TITLE=ReSuKISU" >> "$GITHUB_ENV"
             fi
           else
-            echo "ZIP_NAME=Vanilla-Kernel-4.14-Camellia.zip" >> "$GITHUB_ENV"
-            echo "BUILD_TITLE=Vanilla Kernel" >> "$GITHUB_ENV"
+            echo "BUILD_TITLE=Vanilla" >> "$GITHUB_ENV"
           fi
+
+          echo "Selected build: $BUILD_TYPE"
+          echo "SUSFS enabled: $INCLUDE_SUSFS"
 
       - name: Setup Environment & Dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             build-essential \
             libncurses-dev \
@@ -61,15 +73,41 @@ jobs:
             wget \
             curl \
             zip \
-            dos2unix
+            dos2unix \
+            python3 \
+            device-tree-compiler
 
       - name: Clone Kernel Source
+        shell: bash
         run: |
+          set -e
+
           git clone --depth=1 \
             https://github.com/cristidclxvi/android_kernel_xiaomi_camellia \
             -b lineage-23.2 kernel-source
 
-      - name: Setup ReSuKISU & SUSFS
+          cd kernel-source
+
+          echo "Kernel source:"
+          git log -1 --oneline
+
+      - name: Validate Defconfig
+        shell: bash
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          set -e
+
+          CONFIG="kernel-source/arch/arm64/configs/$DEFCONFIG"
+
+          if [ ! -f "$CONFIG" ]; then
+            echo "ERROR: Defconfig not found: $CONFIG"
+            exit 1
+          fi
+
+          echo "Using defconfig: $DEFCONFIG"
+
+      - name: Setup ReSuKISU
         if: inputs.build_type == 'ReSuKISU'
         shell: bash
         run: |
@@ -79,43 +117,77 @@ jobs:
           git clone --depth=1 \
             https://github.com/ReSukiSU/ReSukiSU.git KernelSU
 
-          ln -sfn ../KernelSU/kernel drivers/KernelSU
-
-          if ! grep -q "KernelSU" drivers/Makefile; then
-            echo "obj-y += KernelSU/" >> drivers/Makefile
+          if [ ! -d KernelSU/kernel ]; then
+            echo "ERROR: KernelSU kernel directory not found!"
+            exit 1
           fi
 
-          cat <<'EOF' >> "arch/arm64/configs/${{ inputs.defconfig }}"
-          CONFIG_KSU=y
-          CONFIG_KPROBES=y
-          CONFIG_HAVE_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-          EOF
+          mkdir -p drivers
 
-          if [ "${{ inputs.include_susfs }}" = "true" ]; then
-            git clone --depth=1 \
-              https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+          ln -sfn ../KernelSU/kernel drivers/KernelSU
 
-            cp ../susfs4ksu/kernel_patches/fs/susfs.c fs/
-            cp ../susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+          if ! grep -q 'drivers/KernelSU/' drivers/Makefile; then
+            echo 'obj-y += KernelSU/' >> drivers/Makefile
+          fi
 
-            cp ../susfs4ksu/kernel_patches/include/linux/susfs_def.h \
-              include/linux/ 2>/dev/null || true
+          CONFIG_FILE="arch/arm64/configs/${{ inputs.defconfig }}"
 
-            cp ../susfs4ksu/kernel_patches/fs/sus_su.c \
-              fs/ 2>/dev/null || true
+          if ! grep -q '^CONFIG_KSU=' "$CONFIG_FILE"; then
+            echo 'CONFIG_KSU=y' >> "$CONFIG_FILE"
+          fi
 
-            patch -p1 \
-              < ../susfs4ksu/kernel_patches/50_recipe_for_4.14.patch || true
+          if ! grep -q '^CONFIG_KPROBES=' "$CONFIG_FILE"; then
+            echo 'CONFIG_KPROBES=y' >> "$CONFIG_FILE"
+          fi
 
-            cd KernelSU
+          if ! grep -q '^CONFIG_HAVE_KPROBES=' "$CONFIG_FILE"; then
+            echo 'CONFIG_HAVE_KPROBES=y' >> "$CONFIG_FILE"
+          fi
 
-            patch -p1 \
-              < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          if ! grep -q '^CONFIG_KPROBE_EVENTS=' "$CONFIG_FILE"; then
+            echo 'CONFIG_KPROBE_EVENTS=y' >> "$CONFIG_FILE"
+          fi
 
-            cd ..
+          echo "ReSuKISU source prepared."
 
-            cat <<'EOF' >> "arch/arm64/configs/${{ inputs.defconfig }}"
+      - name: Setup SUSFS
+        if: inputs.build_type == 'ReSuKISU' && inputs.include_susfs
+        shell: bash
+        run: |
+          set -e
+          cd kernel-source
+
+          git clone --depth=1 \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            ../susfs4ksu
+
+          SUSFS_DIR="../susfs4ksu/kernel_patches"
+
+          if [ ! -f "$SUSFS_DIR/50_recipe_for_4.14.patch" ]; then
+            echo "ERROR: SUSFS 4.14 patch not found!"
+            exit 1
+          fi
+
+          if [ ! -f "$SUSFS_DIR/KernelSU/10_enable_susfs_for_ksu.patch" ]; then
+            echo "ERROR: KernelSU SUSFS patch not found!"
+            exit 1
+          fi
+
+          # Apply kernel SUSFS patch.
+          patch --batch --forward -p1 \
+            < "$SUSFS_DIR/50_recipe_for_4.14.patch"
+
+          # Apply SUSFS integration patch to KernelSU.
+          cd KernelSU
+
+          patch --batch --forward -p1 \
+            < "../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+
+          cd ..
+
+          CONFIG_FILE="arch/arm64/configs/${{ inputs.defconfig }}"
+
+          cat >> "$CONFIG_FILE" <<'EOF'
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -129,26 +201,77 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_SU=y
           EOF
-          fi
+
+          echo "SUSFS patches applied."
 
       - name: Download Proton-Clang Toolchain
+        shell: bash
         run: |
-          mkdir -p toolchain/clang
-          cd toolchain/clang
-          git clone --depth=1 \
-            https://github.com/kdrag0n/proton-clang.git .
+          set -e
 
-      - name: Setup GCC Toolchain
+          mkdir -p toolchain/clang
+
+          git clone --depth=1 \
+            https://github.com/kdrag0n/proton-clang.git \
+            toolchain/clang
+
+          if [ ! -x toolchain/clang/bin/clang ]; then
+            echo "ERROR: Clang compiler not found!"
+            exit 1
+          fi
+
+          toolchain/clang/bin/clang --version
+
+      - name: Setup GCC Toolchains
+        shell: bash
         run: |
-          cd toolchain
+          set -e
+
+          mkdir -p toolchain
 
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
-            gcc64
+            toolchain/gcc64
 
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
-            gcc32
+            toolchain/gcc32
+
+          echo "GCC toolchains downloaded."
+
+      - name: Configure Kernel
+        shell: bash
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          set -e
+          cd kernel-source
+
+          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          export KBUILD_BUILD_USER="GitHub-Actions"
+          export KBUILD_BUILD_HOST="Camellia-Builder"
+
+          make O=out ARCH=arm64 "$DEFCONFIG"
+
+          if [ ! -f out/.config ]; then
+            echo "ERROR: Kernel .config was not generated!"
+            exit 1
+          fi
+
+          # Verify requested KernelSU/SUSFS options.
+          if grep -q '^CONFIG_KSU=y' out/.config; then
+            echo "CONFIG_KSU is enabled."
+          else
+            echo "WARNING: CONFIG_KSU is not enabled in final config."
+          fi
+
+          if grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
+            echo "CONFIG_KSU_SUSFS is enabled."
+          fi
 
       - name: Compile Kernel
         shell: bash
@@ -156,19 +279,21 @@ jobs:
           set -e
           cd kernel-source
 
-          export KBUILD_BUILD_USER="root"
-          export KBUILD_BUILD_HOST="root"
-
           export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+
+          export ARCH=arm64
+          export SUBARCH=arm64
 
           export HOSTCC=/usr/bin/gcc
           export HOSTCXX=/usr/bin/g++
           export HOSTLD=/usr/bin/ld
           export HOSTAR=/usr/bin/ar
 
-          make O=out ARCH=arm64 "${{ inputs.defconfig }}"
+          export KBUILD_BUILD_USER="GitHub-Actions"
+          export KBUILD_BUILD_HOST="Camellia-Builder"
 
-          make -j"$(nproc --all)" O=out \
+          make -j"$(nproc --all)" \
+            O=out \
             ARCH=arm64 \
             CC=clang \
             LD=ld.lld \
@@ -179,85 +304,48 @@ jobs:
             STRIP=llvm-strip \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi-
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            Image.gz-dtb
 
-      - name: Verify Kernel Image
+      - name: Prepare Kernel Image Artifact
         shell: bash
         run: |
           set -e
 
           cd kernel-source
 
-          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "KERNEL_IMAGE=out/arch/arm64/boot/Image.gz-dtb" >> "$GITHUB_ENV"
-          elif [ -f out/arch/arm64/boot/Image.gz ]; then
-            echo "KERNEL_IMAGE=out/arch/arm64/boot/Image.gz" >> "$GITHUB_ENV"
-          elif [ -f out/arch/arm64/boot/Image ]; then
-            echo "KERNEL_IMAGE=out/arch/arm64/boot/Image" >> "$GITHUB_ENV"
+          OUTPUT_DIR="$GITHUB_WORKSPACE/kernel-output"
+          BOOT_DIR="out/arch/arm64/boot"
+
+          mkdir -p "$OUTPUT_DIR"
+
+          if [ -s "$BOOT_DIR/Image.gz-dtb" ]; then
+            IMAGE="$BOOT_DIR/Image.gz-dtb"
+            IMAGE_NAME="Image.gz-dtb"
+          elif [ -s "$BOOT_DIR/Image.gz" ]; then
+            IMAGE="$BOOT_DIR/Image.gz"
+            IMAGE_NAME="Image.gz"
+          elif [ -s "$BOOT_DIR/Image" ]; then
+            IMAGE="$BOOT_DIR/Image"
+            IMAGE_NAME="Image"
           else
-            echo "ERROR: Kernel image not found!"
+            echo "ERROR: No valid kernel image found!"
+            echo "Checked directory: $BOOT_DIR"
+            ls -lah "$BOOT_DIR" || true
             exit 1
           fi
 
-      - name: Package Kernel (AnyKernel3)
-        shell: bash
-        run: |
-          set -e
+          cp "$IMAGE" "$OUTPUT_DIR/$IMAGE_NAME"
 
-          git clone --depth=1 \
-            https://github.com/osm0sis/AnyKernel3 \
-            -b master anykernel
+          echo "Kernel image prepared:"
+          ls -lh "$OUTPUT_DIR/$IMAGE_NAME"
 
-          rm -rf anykernel/.git anykernel/README.md
+          file "$OUTPUT_DIR/$IMAGE_NAME"
 
-          cat <<'EOF' > anykernel/anykernel.sh
-          properties() { '
-          kernel.string=Custom Kernel 4.14 Camellia
-          do.devicecheck=0
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          '; }
-
-          boot_attributes() {
-          set_perm_recursive 0 0 755 644 $RAMDISK/*;
-          set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
-          }
-
-          BLOCK=/dev/block/by-name/boot;
-          IS_SLOT_DEVICE=auto;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-
-          . tools/ak3-core.sh;
-          dump_boot;
-          write_boot;
-          EOF
-
-          cp "kernel-source/$KERNEL_IMAGE" anykernel/
-
-          cd anykernel
-
-          zip -r9 "$GITHUB_WORKSPACE/${{ env.ZIP_NAME }}" .
-
-      - name: Verify ZIP Package
-        shell: bash
-        run: |
-          set -e
-
-          if [ ! -s "${{ env.ZIP_NAME }}" ]; then
-            echo "ERROR: ZIP package is missing or empty!"
-            exit 1
-          fi
-
-          echo "Package created successfully:"
-          ls -lh "${{ env.ZIP_NAME }}"
-
-      - name: Upload Kernel ZIP Artifact
+      - name: Upload Kernel Image Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_NAME }}
-          path: ${{ env.ZIP_NAME }}
+          name: Camellia-Kernel-Image
+          path: kernel-output/*
           if-no-files-found: error
           retention-days: 14
