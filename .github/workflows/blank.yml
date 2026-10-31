@@ -1,5 +1,5 @@
 
-name: Build Kernel 4.14 (Vanilla / ReSuKISU + SUSFS)
+name: Build Kernel 4.14 (Vanilla / BakaSU + SUSFS)
 
 on:
   workflow_dispatch:
@@ -13,16 +13,16 @@ on:
         description: 'Select Kernel Build Type'
         required: true
         type: choice
-        default: 'ReSuKISU'
+        default: 'BakaSU'
         options:
           - Vanilla
-          - ReSuKISU
+          - BakaSU
 
       include_susfs:
-        description: 'Enable SUSFS (Only for ReSuKISU)'
+        description: 'Enable BakaSU SUSFS (Requires Kernel-side SUSFS Backport)'
         required: true
         type: boolean
-        default: true
+        default: false
 
       custom_dir:
         description: 'Custom Directory Inside Cloned Kernel Source'
@@ -41,9 +41,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential libncurses-dev libssl-dev \
-            libelf-dev bison flex bc git wget curl \
-            zip dos2unix python3
+            build-essential \
+            libncurses-dev \
+            libssl-dev \
+            libelf-dev \
+            bison flex \
+            bc git wget curl \
+            zip dos2unix \
+            python3
 
       - name: Clone Kernel Source
         run: |
@@ -72,7 +77,7 @@ jobs:
           KERNEL_DIR="$GITHUB_WORKSPACE/kernel-source/$CUSTOM_DIR"
 
           if [ ! -d "$KERNEL_DIR" ]; then
-            echo "Custom directory not found: $KERNEL_DIR"
+            echo "Custom directory not found!"
             exit 1
           fi
 
@@ -90,76 +95,70 @@ jobs:
 
           echo "Kernel directory: $KERNEL_DIR"
 
-      - name: Setup ReSuKISU & SUSFS
-        if: inputs.build_type == 'ReSuKISU'
-        env:
-          INCLUDE_SUSFS: ${{ inputs.include_susfs }}
-          DEFCONFIG: ${{ inputs.defconfig }}
+      - name: Setup BakaSU
+        if: inputs.build_type == 'BakaSU'
         run: |
           set -e
           cd "$KERNEL_DIR"
 
-          git clone --depth=1 \
-            https://github.com/ReSukiSU/ReSukiSU.git \
-            KernelSU
+          curl -LSs \
+            "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" \
+            -o "$RUNNER_TEMP/bakasu-setup.sh"
 
-          ln -sfn ../KernelSU/kernel drivers/KernelSU
+          bash "$RUNNER_TEMP/bakasu-setup.sh"
 
-          if ! grep -q 'obj-y += KernelSU/' drivers/Makefile; then
-            echo 'obj-y += KernelSU/' >> drivers/Makefile
-          fi
+          echo "BakaSU setup completed!"
+
+      - name: Configure BakaSU
+        if: inputs.build_type == 'BakaSU'
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+          INCLUDE_SUSFS: ${{ inputs.include_susfs }}
+        run: |
+          set -e
+          cd "$KERNEL_DIR"
 
           CONFIG_FILE="arch/arm64/configs/$DEFCONFIG"
 
-          sed -i '/^CONFIG_KSU=/d' "$CONFIG_FILE"
+          # Remove old BakaSU/KernelSU config entries
+          sed -i \
+            -e '/^CONFIG_KSU=/d' \
+            -e '/^CONFIG_KSU_MANUAL_HOOK=/d' \
+            -e '/^CONFIG_KSU_SUSFS=/d' \
+            -e '/^CONFIG_KALLSYMS_ALL=/d' \
+            -e '/^# CONFIG_KSU.* is not set$/d' \
+            "$CONFIG_FILE"
 
           cat <<EOF >> "$CONFIG_FILE"
           CONFIG_KSU=y
-          CONFIG_KPROBES=y
-          CONFIG_HAVE_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
+          CONFIG_KALLSYMS_ALL=y
           EOF
 
           if [ "$INCLUDE_SUSFS" = "true" ]; then
-            git clone --depth=1 \
-              https://gitlab.com/simonpunk/susfs4ksu.git \
-              "$RUNNER_TEMP/susfs4ksu"
 
-            SUSFS_DIR="$RUNNER_TEMP/susfs4ksu"
-
-            cp "$SUSFS_DIR/kernel_patches/fs/susfs.c" fs/
-            cp "$SUSFS_DIR/kernel_patches/include/linux/susfs.h" include/linux/
-
-            if [ -f "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" ]; then
-              cp "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" include/linux/
-            fi
-
-            if [ -f "$SUSFS_DIR/kernel_patches/fs/sus_su.c" ]; then
-              cp "$SUSFS_DIR/kernel_patches/fs/sus_su.c" fs/
-            fi
-
-            patch -p1 < "$SUSFS_DIR/kernel_patches/50_recipe_for_4.14.patch"
-
-            cd KernelSU
-            patch -p1 < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-
-            cd "$KERNEL_DIR"
+            echo "Enabling BakaSU SUSFS mode"
 
             cat <<EOF >> "$CONFIG_FILE"
           CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_SU=y
           EOF
+
+            if [ ! -f fs/susfs.c ] || [ ! -f include/linux/susfs.h ]; then
+              echo "ERROR: Kernel-side SUSFS backport is missing!"
+              echo "Please backport compatible SUSFS patches first."
+              exit 1
+            fi
+
+          else
+
+            echo "Enabling BakaSU Manual Hook mode"
+
+            cat <<EOF >> "$CONFIG_FILE"
+          CONFIG_KSU_MANUAL_HOOK=y
+          EOF
+
           fi
+
+          echo "BakaSU configuration completed!"
 
       - name: Download Proton-Clang Toolchain
         run: |
@@ -198,6 +197,8 @@ jobs:
           export HOSTLD=/usr/bin/ld
           export HOSTAR=/usr/bin/ar
 
+          echo "Generating Defconfig..."
+
           make O=out ARCH=arm64 "$DEFCONFIG"
 
           MAKE_ARGS=(
@@ -216,11 +217,11 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
           )
 
-          if make -n "${MAKE_ARGS[@]}" Image.gz-dtb >/dev/null 2>&1; then
-            make "${MAKE_ARGS[@]}" Image.gz-dtb dtbs modules
-          else
-            make "${MAKE_ARGS[@]}" Image.gz dtbs modules
-          fi
+          echo "Starting Kernel Compilation..."
+
+          make "${MAKE_ARGS[@]}" Image.gz-dtb dtbs modules
+
+          echo "Kernel Compilation Completed!"
 
       - name: Collect Kernel Images, DTB & Modules
         run: |
@@ -228,33 +229,33 @@ jobs:
 
           OUT="$KERNEL_DIR/out"
           DEST="$GITHUB_WORKSPACE/kernel-artifacts"
+          BOOT_DIR="$OUT/arch/arm64/boot"
 
           mkdir -p "$DEST/kernel"
           mkdir -p "$DEST/dtb"
           mkdir -p "$DEST/modules"
           mkdir -p "$DEST/other"
 
-          BOOT_DIR="$OUT/arch/arm64/boot"
-
           if [ ! -d "$BOOT_DIR" ]; then
             echo "Kernel boot output directory not found!"
             exit 1
           fi
 
-          # Kernel images
-          find "$BOOT_DIR" -maxdepth 1 -type f -name 'Image*' \
+          # Collect Kernel Images
+          find "$BOOT_DIR" -maxdepth 1 -type f \
+            -name 'Image*' \
             -exec cp {} "$DEST/kernel/" \;
 
-          # DTB and DTBO
+          # Collect DTB and DTBO
           find "$BOOT_DIR" -type f \
             \( -name '*.dtb' -o -name '*.dtbo' \) \
             -exec cp --parents {} "$DEST/dtb/" \;
 
-          # Kernel modules
+          # Collect Kernel Modules
           find "$OUT" -type f -name '*.ko' \
             -exec cp --parents {} "$DEST/modules/" \;
 
-          # Additional outputs
+          # Collect Additional Outputs
           for FILE in vmlinux System.map .config Module.symvers; do
             if [ -f "$OUT/$FILE" ]; then
               cp "$OUT/$FILE" "$DEST/other/"
@@ -262,17 +263,17 @@ jobs:
           done
 
           if ! find "$DEST/kernel" -type f | grep -q .; then
-            echo "No kernel Image found!"
+            echo "No Kernel Image found!"
             exit 1
           fi
 
-          echo "Collected files:"
+          echo "Collected Build Outputs:"
           find "$DEST" -type f
 
       - name: Upload Kernel Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-${{ inputs.build_type }}-${{ github.run_number }}
+          name: Camellia-Kernel-BakaSU-${{ github.run_number }}
           path: kernel-artifacts/
           if-no-files-found: error
           retention-days: 14
