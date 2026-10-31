@@ -1,231 +1,204 @@
 
-name: Build Kernel 4.14 (Vanilla / KernelSU-Next + SUSFS)
+name: Build Kernel 4.14 (AOSP Clang / KernelSU-Next Legacy)
 
 on:
   workflow_dispatch:
     inputs:
       defconfig:
-        description: 'Target Defconfig File Name'
+        description: "Target Defconfig"
         required: true
-        default: 'camellian_gl_defconfig'
+        default: "camellian_gl_base_defconfig"
+        type: string
 
       build_type:
-        description: 'Select Kernel Build Type'
+        description: "Kernel Build Type"
         required: true
         type: choice
-        default: 'KernelSU-Next'
+        default: "KernelSU-Next"
         options:
           - Vanilla
           - KernelSU-Next
 
-      include_susfs:
-        description: 'Enable SUSFS (Only for KernelSU-Next)'
+      kernel_dir:
+        description: "Kernel Source Directory"
         required: true
-        type: boolean
-        default: true
+        default: "camellian-t-oss"
+        type: string
 
-      custom_dir:
-        description: 'Custom Directory Inside Cloned Kernel Source'
+      jobs:
+        description: "Build Jobs"
         required: true
-        default: './camellian-t-oss/'
+        default: "4"
+        type: string
+
+env:
+  KERNEL_REPO: https://github.com/noonomyen/camellian-linux.git
+  KERNEL_BRANCH: master
+  CLANG_VERSION: clang-r450784d
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout Workflow Repository
-        uses: actions/checkout@v4
-
-      - name: Setup Environment & Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
+            bc \
+            bison \
             build-essential \
+            cpio \
+            curl \
+            flex \
+            git \
+            libelf-dev \
             libncurses-dev \
             libssl-dev \
-            libelf-dev \
-            bison flex \
-            bc git wget curl \
-            zip dos2unix \
-            python3
+            lz4 \
+            python3 \
+            python-is-python3 \
+            rsync \
+            unzip \
+            wget \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            device-tree-compiler
 
       - name: Clone Kernel Source
         run: |
-          git clone --depth=1 --single-branch \
-            https://github.com/noonomyen/camellian-linux \
-            -b master \
+          git clone --depth=1 \
+            --branch "$KERNEL_BRANCH" \
+            "$KERNEL_REPO" \
             kernel-source
 
-      - name: Enter Custom Directory
-        env:
-          CUSTOM_DIR: ${{ inputs.custom_dir }}
-          DEFCONFIG: ${{ inputs.defconfig }}
-        run: |
-          set -e
-
-          CUSTOM_DIR="${CUSTOM_DIR#./}"
-          CUSTOM_DIR="${CUSTOM_DIR%/}"
-
-          case "$CUSTOM_DIR" in
-            ""|/*|..|../*|*/../*|*/..)
-              echo "Invalid custom directory!"
-              exit 1
-              ;;
-          esac
-
-          KERNEL_DIR="$GITHUB_WORKSPACE/kernel-source/$CUSTOM_DIR"
+          KERNEL_DIR="$GITHUB_WORKSPACE/kernel-source/${{ inputs.kernel_dir }}"
 
           if [ ! -d "$KERNEL_DIR" ]; then
-            echo "Custom directory not found!"
-            exit 1
-          fi
-
-          if [ ! -f "$KERNEL_DIR/Makefile" ]; then
-            echo "Kernel Makefile not found!"
-            exit 1
-          fi
-
-          if [ ! -f "$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG" ]; then
-            echo "Defconfig not found!"
+            echo "ERROR: Kernel directory not found!"
+            echo "Expected: $KERNEL_DIR"
             exit 1
           fi
 
           echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
 
-          echo "Kernel Directory: $KERNEL_DIR"
-          echo "Defconfig: $DEFCONFIG"
-
-      - name: Setup KernelSU-Next (Legacy Method)
-        if: inputs.build_type == 'KernelSU-Next'
-        env:
-          DEFCONFIG: ${{ inputs.defconfig }}
+      - name: Download AOSP Clang
         run: |
-          set -e
-          cd "$KERNEL_DIR"
+          mkdir -p "$GITHUB_WORKSPACE/toolchains/aosp-clang"
 
-          echo "Installing KernelSU-Next Legacy..."
+          curl -L --retry 3 --fail \
+            "$CLANG_URL" \
+            -o "$GITHUB_WORKSPACE/clang.tar.gz"
+
+          tar -xzf "$GITHUB_WORKSPACE/clang.tar.gz" \
+            -C "$GITHUB_WORKSPACE/toolchains/aosp-clang"
+
+          echo "$GITHUB_WORKSPACE/toolchains/aosp-clang/bin" >> "$GITHUB_PATH"
+
+          echo "AOSP Clang:"
+          "$GITHUB_WORKSPACE/toolchains/aosp-clang/bin/clang" --version
+
+          echo "AOSP LLVM tools:"
+          for tool in ld.lld llvm-ar llvm-nm llvm-objcopy \
+                      llvm-objdump llvm-strip llvm-ranlib \
+                      llvm-readelf; do
+            test -x "$GITHUB_WORKSPACE/toolchains/aosp-clang/bin/$tool" \
+              || {
+                echo "Missing AOSP tool: $tool"
+                exit 1
+              }
+          done
+
+      - name: Setup KernelSU-Next Legacy
+        if: inputs.build_type == 'KernelSU-Next'
+        working-directory: ${{ github.workspace }}/kernel-source
+        run: |
+          cd "$KERNEL_DIR"
 
           curl -LSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s legacy
 
-          CONFIG_FILE="arch/arm64/configs/$DEFCONFIG"
-
-          sed -i \
-            -e '/^CONFIG_KSU=/d' \
-            -e '/^CONFIG_KPROBES=/d' \
-            -e '/^CONFIG_KPROBE_EVENTS=/d' \
-            -e '/^CONFIG_KSU_KPROBE_HOOKS=/d' \
-            "$CONFIG_FILE"
-
-          cat <<EOF >> "$CONFIG_FILE"
-          CONFIG_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
-          CONFIG_KSU_KPROBE_HOOKS=y
-          CONFIG_KSU=y
-          EOF
-
-          echo "KernelSU-Next Legacy integration completed."
-
-      - name: Setup SUSFS (Kernel 4.14)
-        if: inputs.build_type == 'KernelSU-Next' && inputs.include_susfs == true
-        env:
-          DEFCONFIG: ${{ inputs.defconfig }}
+      - name: Configure Kernel
         run: |
-          set -e
           cd "$KERNEL_DIR"
 
-          echo "Cloning SUSFS Kernel 4.14 branch..."
+          DEFCONFIG="${{ inputs.defconfig }}"
+          OUT_DIR="$KERNEL_DIR/out"
 
-          git clone --depth=1 --single-branch \
-            -b kernel-4.14 \
-            https://gitlab.com/simonpunk/susfs4ksu.git \
-            "$RUNNER_TEMP/susfs4ksu"
+          if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
+            echo "ERROR: Defconfig not found: $DEFCONFIG"
+            exit 1
+          fi
 
-          SUSFS_DIR="$RUNNER_TEMP/susfs4ksu"
+          mkdir -p "$OUT_DIR"
 
-          # Verify required patches
-          test -f "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.14.patch"
-          test -f "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          make O="$OUT_DIR" \
+            ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTLD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            "$DEFCONFIG"
 
-          # Copy SUSFS kernel files
-          cp -a "$SUSFS_DIR/kernel_patches/fs/." fs/
-          cp -a "$SUSFS_DIR/kernel_patches/include/linux/." include/linux/
+          if [ "${{ inputs.build_type }}" = "KernelSU-Next" ]; then
+            chmod +x scripts/config
 
-          # Apply KernelSU SUSFS patch
-          patch -p1 -d KernelSU \
-            < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+            scripts/config --file "$OUT_DIR/.config" \
+              --enable KSU \
+              --enable KPROBES \
+              --enable KPROBE_EVENTS \
+              --enable KSU_KPROBE_HOOKS
 
-          # Apply Linux 4.14 SUSFS patch
-          patch -p1 \
-            < "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.14.patch"
+            make O="$OUT_DIR" \
+              ARCH=arm64 \
+              CC=clang \
+              LD=ld.lld \
+              AR=llvm-ar \
+              NM=llvm-nm \
+              OBJCOPY=llvm-objcopy \
+              OBJDUMP=llvm-objdump \
+              STRIP=llvm-strip \
+              HOSTCC=clang \
+              HOSTCXX=clang++ \
+              HOSTLD=ld.lld \
+              CROSS_COMPILE=aarch64-linux-gnu- \
+              CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+              CLANG_TRIPLE=aarch64-linux-gnu- \
+              olddefconfig
+          fi
 
-          CONFIG_FILE="arch/arm64/configs/$DEFCONFIG"
+          echo "========== Kernel Configuration =========="
+          grep -E 'CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=' \
+            "$OUT_DIR/.config" || true
 
-          sed -i '/^CONFIG_KSU_SUSFS/d' "$CONFIG_FILE"
-
-          cat <<EOF >> "$CONFIG_FILE"
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_SU=y
-          EOF
-
-          echo "SUSFS patch applied."
-
-      - name: Download Proton-Clang Toolchain
+      - name: Build Kernel
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/toolchain"
-
-          git clone --depth=1 \
-            https://github.com/kdrag0n/proton-clang.git \
-            "$GITHUB_WORKSPACE/toolchain/clang"
-
-      - name: Setup GCC Toolchain
-        run: |
-          cd "$GITHUB_WORKSPACE/toolchain"
-
-          git clone --depth=1 \
-            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
-            gcc64
-
-          git clone --depth=1 \
-            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
-            gcc32
-
-      - name: Compile Kernel
-        env:
-          DEFCONFIG: ${{ inputs.defconfig }}
-        run: |
-          set -e
           cd "$KERNEL_DIR"
 
-          export KBUILD_BUILD_USER="root"
-          export KBUILD_BUILD_HOST="root"
+          OUT_DIR="$KERNEL_DIR/out"
+          JOBS="${{ inputs.jobs }}"
 
-          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+          echo "========== Build Information =========="
+          echo "Kernel: $KERNEL_DIR"
+          echo "Defconfig: ${{ inputs.defconfig }}"
+          echo "Build Type: ${{ inputs.build_type }}"
+          echo "Compiler: AOSP $CLANG_VERSION"
+          echo "Jobs: $JOBS"
 
-          export HOSTCC=/usr/bin/gcc
-          export HOSTCXX=/usr/bin/g++
-          export HOSTLD=/usr/bin/ld
-          export HOSTAR=/usr/bin/ar
-
-          echo "Generating Defconfig..."
-
-          make O=out ARCH=arm64 "$DEFCONFIG"
-
-          MAKE_ARGS=(
-            -j"$(nproc --all)"
-            O=out
+          COMMON_ARGS=(
+            O="$OUT_DIR"
             ARCH=arm64
             CC=clang
             LD=ld.lld
@@ -234,81 +207,78 @@ jobs:
             OBJCOPY=llvm-objcopy
             OBJDUMP=llvm-objdump
             STRIP=llvm-strip
+            HOSTCC=clang
+            HOSTCXX=clang++
+            HOSTLD=ld.lld
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
             CLANG_TRIPLE=aarch64-linux-gnu-
-            CROSS_COMPILE=aarch64-linux-android-
-            CROSS_COMPILE_ARM32=arm-linux-androideabi-
+            LLVM_IAS=1
           )
 
-          echo "Starting Kernel Compilation..."
+          if grep -qE '^[[:space:]]*Image\.gz-dtb:' \
+            arch/arm64/Makefile; then
 
-          if make "${MAKE_ARGS[@]}" -n Image.gz-dtb >/dev/null 2>&1; then
-            make "${MAKE_ARGS[@]}" Image.gz-dtb dtbs modules
+            echo "Building Image.gz-dtb, DTBs and modules"
+
+            make -j"$JOBS" "${COMMON_ARGS[@]}" \
+              Image.gz-dtb dtbs modules
+
           else
-            make "${MAKE_ARGS[@]}" Image.gz dtbs modules
+
+            echo "Image.gz-dtb target unavailable."
+            echo "Building Image.gz, DTBs and modules"
+
+            make -j"$JOBS" "${COMMON_ARGS[@]}" \
+              Image.gz dtbs modules
           fi
 
-          echo "Kernel Compilation Finished!"
-
-      - name: Collect Kernel Images, DTB & Modules
+      - name: Collect Kernel Artifacts
+        if: success()
         run: |
-          set -e
-
           cd "$KERNEL_DIR"
 
-          OUT="$KERNEL_DIR/out"
-          DEST="$GITHUB_WORKSPACE/kernel-artifacts"
+          OUT_DIR="$KERNEL_DIR/out"
+          ARTIFACT_DIR="$GITHUB_WORKSPACE/kernel-artifacts"
 
-          mkdir -p "$DEST/kernel"
-          mkdir -p "$DEST/dtb"
-          mkdir -p "$DEST/modules"
-          mkdir -p "$DEST/other"
+          mkdir -p "$ARTIFACT_DIR"
 
-          BOOT_DIR="$OUT/arch/arm64/boot"
+          BOOT_DIR="$OUT_DIR/arch/arm64/boot"
 
-          if [ ! -d "$BOOT_DIR" ]; then
-            echo "Kernel output directory not found!"
-            exit 1
-          fi
-
-          # Collect kernel images
-          cd "$OUT"
-
-          find arch/arm64/boot -type f \
-            -name 'Image*' \
-            -exec cp --parents {} "$DEST/kernel/" \;
-
-          # Collect DTB and DTBO
-          find . -type f \
-            \( -name '*.dtb' -o -name '*.dtbo' \) \
-            -exec cp --parents {} "$DEST/dtb/" \;
-
-          # Collect kernel modules
-          find . -type f -name '*.ko' \
-            -exec cp --parents {} "$DEST/modules/" \;
-
-          # Collect additional outputs
-          for FILE in vmlinux System.map .config Module.symvers; do
-            if [ -f "$OUT/$FILE" ]; then
-              cp "$OUT/$FILE" "$DEST/other/"
+          for file in Image Image.gz Image.gz-dtb; do
+            if [ -f "$BOOT_DIR/$file" ]; then
+              cp "$BOOT_DIR/$file" "$ARTIFACT_DIR/"
             fi
           done
 
-          # Verify kernel image
-          if ! find "$DEST/kernel" -type f -name 'Image*' | grep -q .; then
-            echo "No kernel Image found!"
+          mkdir -p "$ARTIFACT_DIR/dtb"
+
+          find "$BOOT_DIR" -type f \
+            \( -name "*.dtb" -o -name "*.dtbo" \) \
+            -exec cp --parents {} "$ARTIFACT_DIR/dtb/" \;
+
+          mkdir -p "$ARTIFACT_DIR/modules"
+
+          find "$OUT_DIR" -type f -name "*.ko" -print0 |
+          while IFS= read -r -d '' file; do
+            relative="${file#"$OUT_DIR"/}"
+            mkdir -p "$ARTIFACT_DIR/modules/$(dirname "$relative")"
+            cp "$file" "$ARTIFACT_DIR/modules/$relative"
+          done
+
+          echo "========== Artifacts =========="
+          find "$ARTIFACT_DIR" -type f -printf '%P\n'
+
+          if [ -z "$(find "$ARTIFACT_DIR" -type f -print -quit)" ]; then
+            echo "ERROR: No kernel artifacts found!"
             exit 1
           fi
 
-          echo "================================"
-          echo "Collected Kernel Outputs"
-          echo "================================"
-
-          find "$DEST" -type f -print
-
-      - name: Upload Kernel Build Artifacts
+      - name: Upload Kernel Artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Camellia-Kernel-KSUN-${{ github.run_number }}
+          name: Camellian-Kernel-${{ inputs.build_type }}-${{ github.run_number }}
           path: kernel-artifacts/
           if-no-files-found: error
           retention-days: 14
