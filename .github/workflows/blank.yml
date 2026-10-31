@@ -4,125 +4,113 @@ name: Build Kernel 4.14 (Vanilla / KernelSU-Next + SUSFS)
 on:
   workflow_dispatch:
     inputs:
-      custom_source:
-        description: "Custom Kernel Source URL"
-        required: true
-        default: "https://github.com/micode/xiaomi_kernel_opensource"
-
-      custom_branch:
-        description: "Custom Kernel Branch"
-        required: true
-        default: "camellian-t-oss"
-
-      custom_dir:
-        description: "Custom Kernel Directory"
-        required: true
-        default: "kernel-source/camellian-t-oss"
-
       defconfig:
-        description: "Target Defconfig File Name"
+        description: 'Target Defconfig File Name'
         required: true
-        default: "camellian_gl_defconfig"
+        default: 'camellian_gl_defconfig'
 
       build_type:
-        description: "Kernel Build Type"
+        description: 'Select Kernel Build Type'
         required: true
         type: choice
+        default: 'KernelSU-Next'
         options:
           - Vanilla
           - KernelSU-Next
-        default: KernelSU-Next
 
       include_susfs:
-        description: "Include SUSFS"
+        description: 'Enable SUSFS (Only for KernelSU-Next)'
         required: true
         type: boolean
-        default: false
+        default: true
+
+      custom_dir:
+        description: 'Custom Directory Inside Cloned Kernel Source'
+        required: true
+        default: './camellian-t-oss/'
 
 jobs:
   build:
-    name: Build Kernel 4.14
     runs-on: ubuntu-22.04
 
-    env:
-      KERNEL_SOURCE: ${{ inputs.custom_source }}
-      KERNEL_BRANCH: ${{ inputs.custom_branch }}
-      KERNEL_DIR: ${{ inputs.custom_dir }}
-      DEFCONFIG: ${{ inputs.defconfig }}
-      BUILD_TYPE: ${{ inputs.build_type }}
-      INCLUDE_SUSFS: ${{ inputs.include_susfs }}
-
     steps:
-      - name: Install Dependencies
+      - name: Checkout Workflow Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Environment & Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git curl wget bc bison flex \
-            build-essential zip unzip \
-            libssl-dev libelf-dev \
-            libncurses-dev dwarves \
-            python3 python3-pip \
-            lz4 zstd device-tree-compiler
+            build-essential \
+            libncurses-dev \
+            libssl-dev \
+            libelf-dev \
+            bison flex \
+            bc git wget curl \
+            zip dos2unix \
+            python3
 
-      - name: Clone Custom Kernel Source
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=1 --single-branch \
+            https://github.com/noonomyen/camellian-linux \
+            -b master \
+            kernel-source
+
+      - name: Enter Custom Directory
+        env:
+          CUSTOM_DIR: ${{ inputs.custom_dir }}
+          DEFCONFIG: ${{ inputs.defconfig }}
         run: |
           set -e
 
-          git clone --recursive --depth=1 \
-            -b "$KERNEL_BRANCH" \
-            "$KERNEL_SOURCE" \
-            "$KERNEL_DIR"
+          CUSTOM_DIR="${CUSTOM_DIR#./}"
+          CUSTOM_DIR="${CUSTOM_DIR%/}"
 
-          echo "Kernel source: $KERNEL_SOURCE"
-          echo "Kernel branch: $KERNEL_BRANCH"
-          echo "Kernel directory: $KERNEL_DIR"
+          case "$CUSTOM_DIR" in
+            ""|/*|..|../*|*/../*|*/..)
+              echo "Invalid custom directory!"
+              exit 1
+              ;;
+          esac
 
-      - name: Setup Toolchains
-        run: |
-          set -e
+          KERNEL_DIR="$GITHUB_WORKSPACE/kernel-source/$CUSTOM_DIR"
 
-          mkdir -p toolchain
-
-          git clone --depth=1 \
-            -b android12-release \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
-            toolchain/gcc64
-
-          git clone --depth=1 \
-            -b android12-release \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
-            toolchain/gcc32
-
-          git clone --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            toolchain/clang
-
-          CLANG_BIN="$(find "$GITHUB_WORKSPACE/toolchain/clang" \
-            -type f -path '*/bin/clang' | head -n 1)"
-
-          if [ -z "$CLANG_BIN" ]; then
-            echo "::error::Clang binary not found"
+          if [ ! -d "$KERNEL_DIR" ]; then
+            echo "Custom directory not found!"
             exit 1
           fi
 
-          echo "CLANG_BIN=$(dirname "$CLANG_BIN")" >> "$GITHUB_ENV"
+          if [ ! -f "$KERNEL_DIR/Makefile" ]; then
+            echo "Kernel Makefile not found!"
+            exit 1
+          fi
 
-      - name: Setup KernelSU-Next
+          if [ ! -f "$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG" ]; then
+            echo "Defconfig not found!"
+            exit 1
+          fi
+
+          echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
+
+          echo "Kernel Directory: $KERNEL_DIR"
+          echo "Defconfig: $DEFCONFIG"
+
+      - name: Setup KernelSU-Next (Legacy Method)
         if: inputs.build_type == 'KernelSU-Next'
-        working-directory: ${{ inputs.custom_dir }}
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
         run: |
           set -e
+          cd "$KERNEL_DIR"
+
+          echo "Installing KernelSU-Next Legacy..."
 
           curl -LSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s legacy
 
           CONFIG_FILE="arch/arm64/configs/$DEFCONFIG"
-
-          if [ ! -f "$CONFIG_FILE" ]; then
-            echo "::error::Defconfig not found: $CONFIG_FILE"
-            exit 1
-          fi
 
           sed -i \
             -e '/^CONFIG_KSU=/d' \
@@ -131,59 +119,53 @@ jobs:
             -e '/^CONFIG_KSU_KPROBE_HOOKS=/d' \
             "$CONFIG_FILE"
 
-          cat >> "$CONFIG_FILE" <<'EOF'
-          # KernelSU-Next
-          CONFIG_KSU=y
+          cat <<EOF >> "$CONFIG_FILE"
           CONFIG_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
           CONFIG_KSU_KPROBE_HOOKS=y
+          CONFIG_KSU=y
           EOF
 
-      - name: Setup SUSFS
-        if: inputs.include_susfs == true && inputs.build_type == 'KernelSU-Next'
-        working-directory: ${{ inputs.custom_dir }}
+          echo "KernelSU-Next Legacy integration completed."
+
+      - name: Setup SUSFS (Kernel 4.14)
+        if: inputs.build_type == 'KernelSU-Next' && inputs.include_susfs == true
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
         run: |
           set -e
+          cd "$KERNEL_DIR"
 
-          git clone --depth=1 \
+          echo "Cloning SUSFS Kernel 4.14 branch..."
+
+          git clone --depth=1 --single-branch \
+            -b kernel-4.14 \
             https://gitlab.com/simonpunk/susfs4ksu.git \
             "$RUNNER_TEMP/susfs4ksu"
 
           SUSFS_DIR="$RUNNER_TEMP/susfs4ksu"
 
-          PATCH_FILE="$(find "$SUSFS_DIR/kernel_patches" \
-            -type f -iname '*4.14*.patch' | head -n 1)"
+          # Verify required patches
+          test -f "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.14.patch"
+          test -f "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
 
-          KSU_PATCH="$(find "$SUSFS_DIR/kernel_patches" \
-            -type f -path '*/KernelSU/*' \
-            -iname '*susfs*.patch' | head -n 1)"
+          # Copy SUSFS kernel files
+          cp -a "$SUSFS_DIR/kernel_patches/fs/." fs/
+          cp -a "$SUSFS_DIR/kernel_patches/include/linux/." include/linux/
 
-          if [ -z "$PATCH_FILE" ]; then
-            echo "::error::SUSFS 4.14 patch not found"
-            exit 1
-          fi
+          # Apply KernelSU SUSFS patch
+          patch -p1 -d KernelSU \
+            < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
 
-          if [ -z "$KSU_PATCH" ]; then
-            echo "::error::SUSFS KernelSU integration patch not found"
-            exit 1
-          fi
-
-          cp "$SUSFS_DIR/kernel_patches/fs/susfs.c" fs/
-          cp "$SUSFS_DIR/kernel_patches/include/linux/susfs.h" include/linux/
-
-          if [ -f "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" ]; then
-            cp "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" include/linux/
-          fi
-
-          patch --dry-run -p1 < "$PATCH_FILE"
-          patch -p1 < "$PATCH_FILE"
-
-          patch --dry-run -p1 < "$KSU_PATCH"
-          patch -p1 < "$KSU_PATCH"
+          # Apply Linux 4.14 SUSFS patch
+          patch -p1 \
+            < "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.14.patch"
 
           CONFIG_FILE="arch/arm64/configs/$DEFCONFIG"
 
-          cat >> "$CONFIG_FILE" <<'EOF'
+          sed -i '/^CONFIG_KSU_SUSFS/d' "$CONFIG_FILE"
+
+          cat <<EOF >> "$CONFIG_FILE"
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -198,82 +180,135 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_SU=y
           EOF
 
-      - name: Configure Kernel
-        working-directory: ${{ inputs.custom_dir }}
+          echo "SUSFS patch applied."
+
+      - name: Download Proton-Clang Toolchain
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/toolchain"
+
+          git clone --depth=1 \
+            https://github.com/kdrag0n/proton-clang.git \
+            "$GITHUB_WORKSPACE/toolchain/clang"
+
+      - name: Setup GCC Toolchain
+        run: |
+          cd "$GITHUB_WORKSPACE/toolchain"
+
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+            gcc64
+
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
+            gcc32
+
+      - name: Compile Kernel
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
         run: |
           set -e
-
-          export PATH="$CLANG_BIN:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+          cd "$KERNEL_DIR"
 
           export KBUILD_BUILD_USER="root"
-          export KBUILD_BUILD_HOST="github-actions"
+          export KBUILD_BUILD_HOST="root"
+
+          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+
+          export HOSTCC=/usr/bin/gcc
+          export HOSTCXX=/usr/bin/g++
+          export HOSTLD=/usr/bin/ld
+          export HOSTAR=/usr/bin/ar
+
+          echo "Generating Defconfig..."
 
           make O=out ARCH=arm64 "$DEFCONFIG"
 
-          if [ "$BUILD_TYPE" = "KernelSU-Next" ]; then
-            grep -E \
-              'CONFIG_KSU=|CONFIG_KPROBES=|CONFIG_KPROBE_EVENTS=|CONFIG_KSU_KPROBE_HOOKS=' \
-              out/.config
-          fi
-
-          if [ "$INCLUDE_SUSFS" = "true" ]; then
-            grep 'CONFIG_KSU_SUSFS' out/.config
-          fi
-
-      - name: Build Kernel
-        working-directory: ${{ inputs.custom_dir }}
-        run: |
-          set -e
-
-          export PATH="$CLANG_BIN:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
-
-          export KBUILD_BUILD_USER="root"
-          export KBUILD_BUILD_HOST="github-actions"
-
-          make -j"$(nproc --all)" O=out \
-            ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-android- \
+          MAKE_ARGS=(
+            -j"$(nproc --all)"
+            O=out
+            ARCH=arm64
+            CC=clang
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          )
 
-      - name: Collect Kernel Images
-        working-directory: ${{ inputs.custom_dir }}
+          echo "Starting Kernel Compilation..."
+
+          if make "${MAKE_ARGS[@]}" -n Image.gz-dtb >/dev/null 2>&1; then
+            make "${MAKE_ARGS[@]}" Image.gz-dtb dtbs modules
+          else
+            make "${MAKE_ARGS[@]}" Image.gz dtbs modules
+          fi
+
+          echo "Kernel Compilation Finished!"
+
+      - name: Collect Kernel Images, DTB & Modules
         run: |
           set -e
 
-          OUT="$GITHUB_WORKSPACE/kernel-artifacts"
-          mkdir -p "$OUT"
+          cd "$KERNEL_DIR"
 
-          BOOT="out/arch/arm64/boot"
+          OUT="$KERNEL_DIR/out"
+          DEST="$GITHUB_WORKSPACE/kernel-artifacts"
 
-          for FILE in Image Image.gz Image.gz-dtb; do
-            if [ -f "$BOOT/$FILE" ]; then
-              cp "$BOOT/$FILE" "$OUT/"
-            fi
-          done
+          mkdir -p "$DEST/kernel"
+          mkdir -p "$DEST/dtb"
+          mkdir -p "$DEST/modules"
+          mkdir -p "$DEST/other"
 
-          find "$BOOT" -type f \
-            \( -name '*.dtb' -o -name '*.dtbo' \) \
-            -exec cp --parents {} "$OUT/" \;
+          BOOT_DIR="$OUT/arch/arm64/boot"
 
-          if [ -z "$(find "$OUT" -type f -print -quit)" ]; then
-            echo "::error::No kernel images found"
+          if [ ! -d "$BOOT_DIR" ]; then
+            echo "Kernel output directory not found!"
             exit 1
           fi
 
-          find "$OUT" -type f -printf '%p %s bytes\n'
+          # Collect kernel images
+          cd "$OUT"
 
-      - name: Upload Kernel Artifacts
+          find arch/arm64/boot -type f \
+            -name 'Image*' \
+            -exec cp --parents {} "$DEST/kernel/" \;
+
+          # Collect DTB and DTBO
+          find . -type f \
+            \( -name '*.dtb' -o -name '*.dtbo' \) \
+            -exec cp --parents {} "$DEST/dtb/" \;
+
+          # Collect kernel modules
+          find . -type f -name '*.ko' \
+            -exec cp --parents {} "$DEST/modules/" \;
+
+          # Collect additional outputs
+          for FILE in vmlinux System.map .config Module.symvers; do
+            if [ -f "$OUT/$FILE" ]; then
+              cp "$OUT/$FILE" "$DEST/other/"
+            fi
+          done
+
+          # Verify kernel image
+          if ! find "$DEST/kernel" -type f -name 'Image*' | grep -q .; then
+            echo "No kernel Image found!"
+            exit 1
+          fi
+
+          echo "================================"
+          echo "Collected Kernel Outputs"
+          echo "================================"
+
+          find "$DEST" -type f -print
+
+      - name: Upload Kernel Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Camellian-${{ inputs.build_type }}-${{ inputs.defconfig }}
+          name: Camellia-Kernel-KSUN-${{ github.run_number }}
           path: kernel-artifacts/
           if-no-files-found: error
           retention-days: 14
