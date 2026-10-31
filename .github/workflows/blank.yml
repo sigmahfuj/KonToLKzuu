@@ -1,5 +1,5 @@
 
-name: Build Kernel 4.14 (AOSP Clang / KernelSU-Next Legacy)
+name: Build Kernel 4.14 (AOSP LLVM + GCC / KernelSU-Next Legacy)
 
 on:
   workflow_dispatch:
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Install Dependencies
+      - name: Install Host Dependencies and GCC
         run: |
           sudo apt-get update
 
@@ -63,9 +63,12 @@ jobs:
             rsync \
             unzip \
             wget \
+            device-tree-compiler \
             gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            device-tree-compiler
+            gcc-arm-linux-gnueabi
+
+          aarch64-linux-gnu-gcc --version
+          arm-linux-gnueabi-gcc --version
 
       - name: Clone Kernel Source
         run: |
@@ -78,42 +81,56 @@ jobs:
 
           if [ ! -d "$KERNEL_DIR" ]; then
             echo "ERROR: Kernel directory not found!"
-            echo "Expected: $KERNEL_DIR"
             exit 1
           fi
 
           echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
 
-      - name: Download AOSP Clang
+      - name: Download AOSP Clang and LLVM
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/toolchains/aosp-clang"
+          TOOLCHAIN="$GITHUB_WORKSPACE/toolchains/aosp-clang"
+
+          mkdir -p "$TOOLCHAIN"
 
           curl -L --retry 3 --fail \
             "$CLANG_URL" \
-            -o "$GITHUB_WORKSPACE/clang.tar.gz"
+            -o "$GITHUB_WORKSPACE/aosp-clang.tar.gz"
 
-          tar -xzf "$GITHUB_WORKSPACE/clang.tar.gz" \
-            -C "$GITHUB_WORKSPACE/toolchains/aosp-clang"
+          tar -xzf "$GITHUB_WORKSPACE/aosp-clang.tar.gz" \
+            -C "$TOOLCHAIN"
 
-          echo "$GITHUB_WORKSPACE/toolchains/aosp-clang/bin" >> "$GITHUB_PATH"
+          echo "$TOOLCHAIN/bin" >> "$GITHUB_PATH"
 
-          echo "AOSP Clang:"
-          "$GITHUB_WORKSPACE/toolchains/aosp-clang/bin/clang" --version
+          "$TOOLCHAIN/bin/clang" --version
 
-          echo "AOSP LLVM tools:"
-          for tool in ld.lld llvm-ar llvm-nm llvm-objcopy \
-                      llvm-objdump llvm-strip llvm-ranlib \
-                      llvm-readelf; do
-            test -x "$GITHUB_WORKSPACE/toolchains/aosp-clang/bin/$tool" \
-              || {
-                echo "Missing AOSP tool: $tool"
-                exit 1
-              }
+          for tool in \
+            clang clang++ \
+            ld.lld \
+            llvm-ar \
+            llvm-nm \
+            llvm-ranlib \
+            llvm-objcopy \
+            llvm-objdump \
+            llvm-strip \
+            llvm-readelf \
+            llvm-as \
+            llvm-link \
+            llvm-mc \
+            llvm-addr2line \
+            llvm-symbolizer \
+            llvm-dwarfdump \
+            llvm-profdata; do
+
+            if [ ! -x "$TOOLCHAIN/bin/$tool" ]; then
+              echo "Missing AOSP tool: $tool"
+              exit 1
+            fi
+
+            echo "Found: $tool"
           done
 
       - name: Setup KernelSU-Next Legacy
         if: inputs.build_type == 'KernelSU-Next'
-        working-directory: ${{ github.workspace }}/kernel-source
         run: |
           cd "$KERNEL_DIR"
 
@@ -125,32 +142,39 @@ jobs:
         run: |
           cd "$KERNEL_DIR"
 
-          DEFCONFIG="${{ inputs.defconfig }}"
+          TOOLCHAIN="$GITHUB_WORKSPACE/toolchains/aosp-clang"
           OUT_DIR="$KERNEL_DIR/out"
 
+          export PATH="$TOOLCHAIN/bin:$PATH"
+
+          DEFCONFIG="${{ inputs.defconfig }}"
+
           if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
-            echo "ERROR: Defconfig not found: $DEFCONFIG"
+            echo "ERROR: Defconfig not found!"
             exit 1
           fi
 
           mkdir -p "$OUT_DIR"
 
-          make O="$OUT_DIR" \
-            ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            HOSTCC=clang \
-            HOSTCXX=clang++ \
-            HOSTLD=ld.lld \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            "$DEFCONFIG"
+          COMMON_ARGS=(
+            O="$OUT_DIR"
+            ARCH=arm64
+            CC=clang
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            HOSTCC=clang
+            HOSTCXX=clang++
+            HOSTLD=ld.lld
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CLANG_TRIPLE=aarch64-linux-gnu-
+          )
+
+          make "${COMMON_ARGS[@]}" "$DEFCONFIG"
 
           if [ "${{ inputs.build_type }}" = "KernelSU-Next" ]; then
             chmod +x scripts/config
@@ -161,41 +185,25 @@ jobs:
               --enable KPROBE_EVENTS \
               --enable KSU_KPROBE_HOOKS
 
-            make O="$OUT_DIR" \
-              ARCH=arm64 \
-              CC=clang \
-              LD=ld.lld \
-              AR=llvm-ar \
-              NM=llvm-nm \
-              OBJCOPY=llvm-objcopy \
-              OBJDUMP=llvm-objdump \
-              STRIP=llvm-strip \
-              HOSTCC=clang \
-              HOSTCXX=clang++ \
-              HOSTLD=ld.lld \
-              CROSS_COMPILE=aarch64-linux-gnu- \
-              CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-              CLANG_TRIPLE=aarch64-linux-gnu- \
-              olddefconfig
+            make "${COMMON_ARGS[@]}" olddefconfig
           fi
 
           echo "========== Kernel Configuration =========="
-          grep -E 'CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=' \
+
+          grep -E \
+            'CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=' \
             "$OUT_DIR/.config" || true
 
       - name: Build Kernel
         run: |
           cd "$KERNEL_DIR"
 
+          TOOLCHAIN="$GITHUB_WORKSPACE/toolchains/aosp-clang"
           OUT_DIR="$KERNEL_DIR/out"
-          JOBS="${{ inputs.jobs }}"
 
-          echo "========== Build Information =========="
-          echo "Kernel: $KERNEL_DIR"
-          echo "Defconfig: ${{ inputs.defconfig }}"
-          echo "Build Type: ${{ inputs.build_type }}"
-          echo "Compiler: AOSP $CLANG_VERSION"
-          echo "Jobs: $JOBS"
+          export PATH="$TOOLCHAIN/bin:$PATH"
+
+          JOBS="${{ inputs.jobs }}"
 
           COMMON_ARGS=(
             O="$OUT_DIR"
@@ -216,18 +224,21 @@ jobs:
             LLVM_IAS=1
           )
 
+          echo "========== BUILD INFORMATION =========="
+          echo "AOSP Clang: $CLANG_VERSION"
+          echo "ARM64 GCC: $(aarch64-linux-gnu-gcc --version | head -n 1)"
+          echo "ARM32 GCC: $(arm-linux-gnueabi-gcc --version | head -n 1)"
+          echo "Build Type: ${{ inputs.build_type }}"
+          echo "Defconfig: ${{ inputs.defconfig }}"
+          echo "Jobs: $JOBS"
+
           if grep -qE '^[[:space:]]*Image\.gz-dtb:' \
             arch/arm64/Makefile; then
-
-            echo "Building Image.gz-dtb, DTBs and modules"
 
             make -j"$JOBS" "${COMMON_ARGS[@]}" \
               Image.gz-dtb dtbs modules
 
           else
-
-            echo "Image.gz-dtb target unavailable."
-            echo "Building Image.gz, DTBs and modules"
 
             make -j"$JOBS" "${COMMON_ARGS[@]}" \
               Image.gz dtbs modules
@@ -239,11 +250,10 @@ jobs:
           cd "$KERNEL_DIR"
 
           OUT_DIR="$KERNEL_DIR/out"
+          BOOT_DIR="$OUT_DIR/arch/arm64/boot"
           ARTIFACT_DIR="$GITHUB_WORKSPACE/kernel-artifacts"
 
           mkdir -p "$ARTIFACT_DIR"
-
-          BOOT_DIR="$OUT_DIR/arch/arm64/boot"
 
           for file in Image Image.gz Image.gz-dtb; do
             if [ -f "$BOOT_DIR/$file" ]; then
@@ -262,11 +272,13 @@ jobs:
           find "$OUT_DIR" -type f -name "*.ko" -print0 |
           while IFS= read -r -d '' file; do
             relative="${file#"$OUT_DIR"/}"
+
             mkdir -p "$ARTIFACT_DIR/modules/$(dirname "$relative")"
+
             cp "$file" "$ARTIFACT_DIR/modules/$relative"
           done
 
-          echo "========== Artifacts =========="
+          echo "========== OUTPUT FILES =========="
           find "$ARTIFACT_DIR" -type f -printf '%P\n'
 
           if [ -z "$(find "$ARTIFACT_DIR" -type f -print -quit)" ]; then
